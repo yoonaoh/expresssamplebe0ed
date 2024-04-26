@@ -1,0 +1,287 @@
+{
+  "$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "subscriptionId": { "type": "string" },
+    "resourceGroupName": { "type": "string" },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "workspaceName": {
+      "type": "string",
+      "defaultValue": "[format('workspace{0}', parameters('resourceGroupName'))]"
+    },
+    "workspaceSku": {
+      "type": "object",
+      "defaultValue": { "name": "PerGB2018" }
+    },
+    "containerAppEnvironmentName": {
+      "type": "string",
+      "defaultValue": "[format('container-app-environment-{0}', uniqueString(resourceGroup().id))]"
+    },
+    "containerAppName": {
+      "type": "string",
+      "defaultValue": "[format('container-app-{0}', uniqueString(resourceGroup().id))]"
+    },
+    "containerAppActiveRevisionsMode": {
+      "type": "string",
+      "defaultValue": "Single"
+    },
+    "containerAppIngress": {
+      "type": "object",
+      "defaultValue": { "external": true, "targetPort": 3000 }
+    },
+    "repoUrl": { "type": "string" },
+    "repo": { "type": "string" },
+    "branch": { "type": "string" },
+    "githubToken": { "type": "securestring" },
+    "containerRegistryName": {
+      "type": "string",
+      "defaultValue": "[format('containerRegistry{0}', uniqueString(resourceGroup().id))]"
+    },
+    "containerRegistrySku": { "type": "string", "defaultValue": "Basic" },
+    "oidcUserIdentity": {
+      "type": "string",
+      "defaultValue": "[concat(parameters('containerAppName'), '-','oidcUserIdentity', '-msi')]"
+    },
+    "OidcRbacNameToContainerAppEnvironment": {
+      "type": "string",
+      "defaultValue": "[guid(resourceGroup().id, 'containerAppEnvironment')]"
+    },
+    "OidcRbacNameToContainerApp": {
+      "type": "string",
+      "defaultValue": "[guid(resourceGroup().id, 'containerApp')]"
+    },
+    "OidcRbacNameToContainerRegistry": {
+      "type": "string",
+      "defaultValue": "[guid(resourceGroup().id, 'containerRegistry')]"
+    },
+    "virtualNetworkName": {
+      "type": "string",
+      "defaultValue": "[format('vnet{0}', uniqueString(resourceGroup().id, deployment().name))]"
+    },
+    "subnetName": {
+      "type": "string",
+      "defaultValue": "[format('subnet{0}', uniqueString(resourceGroup().id, deployment().name))]"
+    },
+  },
+  "variables": {},
+  "resources": [
+    {
+      "apiVersion": "2020-08-01",
+      "name": "[parameters('workspaceName')]",
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [],
+      "properties": {
+        "sku": "[parameters('workspaceSku')]",
+        "retentionInDays": 30,
+        "workspaceCapping": {}
+      }
+    },
+    {
+      "apiVersion": "2022-01-01",
+      "name": "[parameters('virtualNetworkName')]",
+      "type": "Microsoft.Network/virtualNetworks",
+      "location": "[parameters('location')]",
+      "dependsOn": [],
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": ["10.0.0.0/16"],
+        },
+        "subnets": [
+          {
+            "name": "[parameters('subnetName')]",
+            "properties": {
+              "addressPrefix": "10.0.0.0/23",
+              "delegations": [
+                {
+                  "name": "Microsoft.App.environments",
+                  "id": "[concat('/subscriptions/', parameters('subscriptionId'), '/resourceGroup/', parameters('resourceGroupName'), '/providers/Microsoft.Network/availableDelegations/Microsoft.App.environments')]",
+                  "type": "Microsoft.Network/availableDelegations",
+                  "properties": {
+                    "serviceName": "Microsoft.App/environments",
+                    "actions": ["Microsoft.Network/virtualNetworks/subnets/join/action"],
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }
+    },
+    {
+      "apiVersion": "2023-05-02-preview",
+      "name": "[parameters('containerAppEnvironmentName')]",
+      "type": "Microsoft.App/managedEnvironments",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', parameters('virtualNetworkName'))]"
+      ],
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName')), '2020-08-01').customerId]",
+            "sharedKey": "[listKeys(concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName')), '2020-08-01').primarySharedKey]"
+          }
+        },
+        "vnetConfiguration": {
+          "infrastructureSubnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('virtualNetworkName'), parameters('subnetName'))]",
+          "internal": false,
+        },
+        "workloadProfiles": [
+          {
+            "name": "Consumption",
+            "workloadProfileType": "Consumption",
+          },
+        ],
+      }
+    },
+    {
+      "apiVersion": "2023-05-02-preview",
+      "name": "[parameters('containerAppName')]",
+      "type": "Microsoft.App/containerapps",
+      "kind": "containerapps",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[concat('Microsoft.App/managedEnvironments/', parameters('containerAppEnvironmentName'))]"
+      ],
+      "properties": {
+        "environmentId": "[concat('/subscriptions/', parameters('subscriptionId'), '/resourceGroups/', parameters('resourceGroupName'),'/providers/Microsoft.App/managedEnvironments/', parameters('containerAppEnvironmentName'))]",
+        "configuration": {
+          "secrets": [],
+          "registries": [],
+          "activeRevisionsMode": "[parameters('containerAppActiveRevisionsMode')]",
+          "ingress": "[parameters('containerAppIngress')]"
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "simple-hello-world-container",
+              "image": "mcr.microsoft.com/k8se/quickstart:latest",
+              "command": [],
+              "resources": { "cpu": 0.25, "memory": ".5Gi" }
+            }
+          ],
+          "scale": { "minReplicas": 0 }
+        },
+        "workloadProfileName": "Consumption"
+      },
+      "resources": [
+        {
+          "apiVersion": "2023-04-01-preview",
+          "name": "current",
+          "type": "sourcecontrols",
+          "dependsOn": [
+            "[concat('Microsoft.App/containerapps/', parameters('containerAppName'))]",
+            "[concat('Microsoft.ContainerRegistry/registries/', parameters('containerRegistryName'))]",
+            "[concat('Microsoft.ManagedIdentity/userAssignedIdentities/', parameters('oidcUserIdentity'))]"
+          ],
+          "properties": {
+            "repoUrl": "[parameters('repoUrl')]",
+            "branch": "[parameters('branch')]",
+            "gitHubActionConfiguration": {
+              "registryInfo": {
+                "registryUrl": "[reference(resourceId('Microsoft.ContainerRegistry/registries/', parameters('containerRegistryName')), '2022-02-01-preview', 'Full').properties.loginServer]",
+                "registryUserName": "[listCredentials(concat('Microsoft.ContainerRegistry/registries/', parameters('containerRegistryName')), '2022-02-01-preview').username]",
+                "registryPassword": "[listCredentials(concat('Microsoft.ContainerRegistry/registries/', parameters('containerRegistryName')), '2022-02-01-preview').passwords[0].value]"
+              },
+              "githubPersonalAccessToken": "[parameters('githubToken')]",
+              "azureCredentials": {
+                "clientId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('oidcUserIdentity')), '2018-11-30').clientId]",
+                "subscriptionId": "[subscription().subscriptionId]",
+                "tenantId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('oidcUserIdentity')), '2018-11-30').tenantId]",
+                "kind": "federated"
+              },
+              "image": "[parameters('containerAppName')]"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "apiVersion": "2022-02-01-preview",
+      "name": "[parameters('containerRegistryName')]",
+      "type": "Microsoft.ContainerRegistry/registries",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [],
+      "sku": { "name": "[parameters('containerRegistrySku')]" },
+      "properties": {
+        "publicNetworkAccess": "Enabled",
+        "zoneRedundancy": "disabled",
+        "adminUserEnabled": true
+      }
+    },
+    {
+      "apiVersion": "2018-11-30",
+      "name": "[parameters('oidcUserIdentity')]",
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [],
+      "properties": {},
+      "resources": [
+        {
+          "apiVersion": "2022-01-31-preview",
+          "name": "[uniqueString(resourceGroup().id)]",
+          "type": "federatedIdentityCredentials",
+          "dependsOn": [
+            "[concat('Microsoft.ManagedIdentity/userAssignedIdentities/', parameters('oidcUserIdentity'))]"
+          ],
+          "properties": {
+            "audiences": ["api://AzureADTokenExchange"],
+            "issuer": "https://token.actions.githubusercontent.com",
+            "subject": "[concat('repo:', last(split(parameters('repoUrl'),'github.com/')), ':ref:refs/heads/main')]"
+          }
+        }
+      ]
+    },
+    {
+      "apiVersion": "2022-04-01",
+      "name": "[parameters('OidcRbacNameToContainerAppEnvironment')]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "dependsOn": [
+        "[concat('Microsoft.ManagedIdentity/userAssignedIdentities/', parameters('oidcUserIdentity'))]",
+        "[concat('Microsoft.App/managedEnvironments/', parameters('containerAppEnvironmentName'))]"
+      ],
+      "scope": "[concat('Microsoft.App/managedEnvironments/', parameters('containerAppEnvironmentName'))]",
+      "properties": {
+        "roleDefinitionId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('oidcUserIdentity')), '2018-11-30').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "apiVersion": "2022-04-01",
+      "name": "[parameters('OidcRbacNameToContainerApp')]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "dependsOn": [
+        "[concat('Microsoft.ManagedIdentity/userAssignedIdentities/', parameters('oidcUserIdentity'))]",
+        "[concat('Microsoft.App/containerapps/', parameters('containerAppName'))]"
+      ],
+      "scope": "[concat('Microsoft.App/containerapps/', parameters('containerAppName'))]",
+      "properties": {
+        "roleDefinitionId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('oidcUserIdentity')), '2018-11-30').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "apiVersion": "2022-04-01",
+      "name": "[parameters('OidcRbacNameToContainerRegistry')]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "dependsOn": [
+        "[concat('Microsoft.ManagedIdentity/userAssignedIdentities/', parameters('oidcUserIdentity'))]",
+        "[concat('Microsoft.ContainerRegistry/registries/', parameters('containerRegistryName'))]"
+      ],
+      "scope": "[concat('Microsoft.ContainerRegistry/registries/', parameters('containerRegistryName'))]",
+      "properties": {
+        "roleDefinitionId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/', 'b24988ac-6180-42a0-ab88-20f7382dd24c')]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('oidcUserIdentity')), '2018-11-30').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    }
+  ]
+}
